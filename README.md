@@ -1,306 +1,238 @@
-# Multi-Version Luraph Deobfuscator
+# Luraph Deobfuscator
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Python: 3.10+](https://img.shields.io/badge/Python-3.10%2B-green.svg)](https://www.python.org/)
-[![Node.js: 18+](https://img.shields.io/badge/Node.js-18%2B-green.svg)](https://nodejs.org/)
-[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
-[![Targets](https://img.shields.io/badge/Targets-Luraph%20v14.7%20%7C%20v14.8%20%7C%20v14.9%20%7C%20v15.1%20%7C%20v15.2-red.svg)](#supported-versions)
+![Python](https://img.shields.io/badge/python-3.10%2B-blue?logo=python&logoColor=white)
+![Node.js](https://img.shields.io/badge/node.js-18%2B-brightgreen?logo=node.js&logoColor=white)
+![License](https://img.shields.io/badge/license-MIT-green)
+![Versions](https://img.shields.io/badge/targets-v14.7%20%7C%20v14.8%20%7C%20v14.9%20%7C%20v15.1%20%7C%20v15.2-red)
+![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen)
 
-A unified, multi-version **Luraph Lua/Luau deobfuscation framework** equipped with **deep structural version detection**. It scans protected scripts, accurately identifies the exact Luraph obfuscator version using Bayesian-style exclusion heuristics and AST/bytecode fingerprints, and dispatches the script to the corresponding specialized deobfuscator engine.
+A multi-version static deobfuscation framework for **Luraph** — a Lua/Luau obfuscator widely used in Roblox exploit ecosystems. Automatically identifies the exact Luraph version using Bayesian-style heuristics, then dispatches to the matching engine for full devirtualization.
 
 ---
 
-## Table of Contents
+## Demo
 
-- [Supported Versions](#supported-versions)
-- [Project Architecture](#project-architecture)
-- [Prerequisites](#prerequisites)
-- [Installation & Setup](#installation--setup)
-- [Usage Guide](#usage-guide)
-  - [Basic Deobfuscation](#basic-deobfuscation)
-  - [Auto-Detection Only](#auto-detection-only)
-  - [JSON Machine-Readable Output (`--json`)](#json-machine-readable-output---json)
-  - [Fast Behavior Trace Mode (`--no-devirt`)](#fast-behavior-trace-mode---no-devirt)
-  - [Forcing a Specific Version / Engine](#forcing-a-specific-version--engine)
-  - [Fast Devirtualization Mode (`--fast`)](#fast-devirtualization-mode---fast)
-  - [Debug Mode (`--debug`)](#debug-mode---debug)
-  - [Quiet Output Mode (`-q`)](#quiet-output-mode--q)
-- [How Version Detection Works](#how-version-detection-works)
-- [Exit Codes](#exit-codes)
-- [Submodule Engines](#submodule-engines)
-- [Contributing](#contributing)
-- [Legal & Disclaimer](#legal--disclaimer)
-- [License](#license)
+**Input** — Luraph v15.2 protected script:
+
+```lua
+-- Luraph Obfuscator | lura.ph
+return setmetatable({...}, {__index = function(t, k)
+    local d = { ["\99\108\111\115"] = "\117\114\101", ... }
+    local __MK = function(...) ... end
+    -- VM chunk with encrypted constants, buffer deserialization ...
+end})
+```
+
+**Detection:**
+
+```
+$ python detector.py sample.lua
+Version : v15.2
+Confidence : 1.00  (structural)
+Minified : yes
+```
+
+**Deobfuscation:**
+
+```
+$ python main.py sample.lua -o clean.lua
+[*] Detected Luraph v15.2 (confidence: 1.00)
+[*] Dispatching to v15.2 engine...
+[*] Lifting VM chunk...
+[+] Done → clean.lua
+```
+
+```lua
+-- Deobfuscated by Luraph Deobfuscator
+local Players = game:GetService("Players")
+local localPlayer = Players.LocalPlayer
+local function onCharacterAdded(character)
+    -- ... full readable Luau source recovered
+end
+```
+
+---
+
+## How It Works
+
+The deobfuscator operates in two phases: detection, then engine dispatch.
+
+```
+┌──────────────────────────────┐
+│   Luraph Protected Script    │
+└──────────────┬───────────────┘
+               │
+               ▼
+┌──────────────────────────────┐
+│ 1. Version Detection         │ ➔ Bayesian scoring across AST patterns,
+│                              │   structural fingerprints, exclusion rules
+└──────────────┬───────────────┘
+               │
+               ▼
+┌──────────────────────────────┐
+│ 2. Engine Dispatch           │ ➔ Routes script to the matched version
+│                              │   engine (v14_v15, v15_1, or v15_2)
+└──────────────┬───────────────┘
+               │
+               ▼
+┌──────────────────────────────┐
+│ 3. Constant Decryption       │ ➔ Recovers encrypted string literals,
+│                              │   numeric constants, and table slots
+└──────────────┬───────────────┘
+               │
+               ▼
+┌──────────────────────────────┐
+│ 4. VM Devirtualization       │ ➔ Disassembles the embedded VM bytecode,
+│                              │   maps opcode handlers, reconstructs ops
+└──────────────┬───────────────┘
+               │
+               ▼
+┌──────────────────────────────┐
+│ 5. CFG / SSA Lifting         │ ➔ Reconstructs control flow, recovers
+│                              │   locals, loops, closures, upvalues
+└──────────────┬───────────────┘
+               │
+               ▼
+┌──────────────────────────────┐
+│   Clean Luau Source Code     │
+└──────────────────────────────┘
+```
+
+1. **Version Detection** (`detector.py`): Scores the input script against all five Luraph versions using structural AST patterns and Bayesian exclusion penalties. Root construct divergence (`setmetatable({...})` for v15.x vs `return({...})` for v14.x) immediately eliminates half the candidates. Sub-version fingerprints (invocation suffixes `:g()` / `:d()` / `:r()`, seed table names `Z=` / `O=`, buffer ops for v15.2) narrow it to one. A header comment alone with zero structural evidence returns `unknown`.
+
+2. **Engine Dispatch** (`main.py`): Routes to one of three engine submodules — `v14_v15` (covering v14.7, v14.8, v14.9), `v15_1`, or `v15_2`. Each engine is a specialized deobfuscation pipeline built for its version's exact bytecode format and VM layout.
+
+3. **Constant Decryption**: Recovers encrypted string literals from the character substitution dictionary (`d={...}` in v15.2), numeric constants from scrambled table slots, and all data-encoding layers the engine uses to obscure immediate values.
+
+4. **VM Devirtualization**: Disassembles the embedded VM instruction stream: extracts opcodes from the dispatcher, maps handlers via the opcode table, and reconstructs operand expressions. For v15.1, runs parallel devirtualization candidates with randomized seeds to handle non-deterministic scrambling.
+
+5. **CFG / SSA Lifting**: Translates decoded bytecode back to readable Luau source. Recovers control flow structures (branches, loops), reassembles closures and upvalue captures, performs register-to-local assignment, and emits clean output targeting the Roblox Luau runtime.
 
 ---
 
 ## Supported Versions
 
-| Luraph Version | Engine Submodule | Engine Status | Key Capabilities |
+| Luraph Version | Engine Submodule | Status | Key Capabilities |
 |---|---|---|---|
-| **Luraph v15.2** | `deobfuscators/v15_2` | Active | VM chunk instrumentation, behavior tracing, 3-level maker lifting |
-| **Luraph v15.1 / v15.0** | `deobfuscators/v15_1` | Stable | Full devirtualization (AST hooking, constant decryption, CFG/SSA reconstruction, Roblox API local naming) |
-| **Luraph v14.9** | `deobfuscators/v14_v15` | Stable | Dedicated v14.9 dispatcher recovery (`O={...}` seed tables, `:r()` suffix) |
-| **Luraph v14.8** | `deobfuscators/v14_v15` | Stable | Dedicated v14.8 dispatcher recovery (`local init = (function(...)` wrapper, `:d()` suffix) |
-| **Luraph v14.7** | `deobfuscators/v14_v15` | Stable | Dedicated v14.7 dispatcher recovery (`Z={...}` seed tables, `:g()` suffix) |
-
----
-
-## Project Architecture
-
-```
-luraph-deobf/
-├── main.py                  # Master CLI entry point & orchestrator
-├── detector.py              # Multi-version detection engine with Bayesian scoring
-├── requirements.txt         # Development & testing dependencies
-├── README.md                # Project documentation
-├── CONTRIBUTING.md          # Contributor guidelines & architecture overview
-├── LICENSE                  # MIT License
-├── .gitignore               # Git ignore configuration
-├── .gitmodules              # Submodule tracking for upstream engines
-└── deobfuscators/
-    ├── v15_2/               # Luraph v15.2 engine (Submodule: horiz-dev/luraph-v15.2-fix-built)
-    ├── v15_1/               # Luraph v15.1/v15 engine (Submodule: ServerDeadd/Luraph-v15.1-Deobfuscator)
-    └── v14_v15/             # Luraph v14.x/v15 engine (Submodule: larpcorrupt/luraph-v15-v14.x-deobfuscator)
-```
+| **v15.2** | `deobfuscators/v15_2` | Active | Buffer deserialization, behavior tracing, 3-level maker lifting |
+| **v15.1 / v15.0** | `deobfuscators/v15_1` | Stable | Full devirtualization, CFG/SSA reconstruction, Roblox API local naming |
+| **v14.9** | `deobfuscators/v14_v15` | Stable | `O={...}` seed table, `:r()` suffix dispatcher recovery |
+| **v14.8** | `deobfuscators/v14_v15` | Stable | `local init = (function(...)` wrapper, `:d()` suffix dispatcher |
+| **v14.7** | `deobfuscators/v14_v15` | Stable | `Z={...}` seed table, `:g()` suffix dispatcher recovery |
 
 ---
 
 ## Prerequisites
 
-1. **Python 3.10+**: Core CLI, detection module, and lifting stages.
-   - [Download Python](https://www.python.org/)
-2. **Node.js 18+**: Required by the v15.1 engine driver.
-   - [Download Node.js](https://nodejs.org/)
-3. **Luau Runtime**: Precompiled `luau` and `luau-ast` binaries for Linux and Windows are included in `deobfuscators/v15_1/bin/`. `main.py` automatically synchronizes these binaries across all submodule engines on startup.
+- **Python 3.10+** — CLI, detection, and lifting stages
+- **Node.js 18+** — required by the v15.1 engine driver
+- **Luau binaries** — prebuilt `luau` / `luau-ast` for Linux/Windows included in `deobfuscators/v15_1/bin/`; `main.py` syncs them on startup
 
 ---
 
-## Installation & Setup
-
-### 1. Clone the Repository with Submodules
-
-Clone this repository with the `--recursive` flag to pull all required deobfuscator submodules:
+## Quick Start
 
 ```bash
-git clone --recursive https://github.com/<your-username>/luraph-deobf.git
-cd luraph-deobf
+# Clone with all engine submodules
+git clone --recursive https://github.com/biggesttard/luraph-deobfuscator.git
+cd luraph-deobfuscator
+
+# Install optional dev dependencies
+pip install -r requirements.txt
+
+# Deobfuscate a script (auto-detects version)
+python main.py obfuscated.lua -o clean.lua
+
+# Detect version only, no deobfuscation
+python detector.py sample.lua
+
+# Get a full JSON breakdown of detection scores
+python detector.py sample.lua --json
+
+# Force a specific version
+python main.py input.lua -o clean.lua --version v15.2
+
+# Behavior trace mode (fast, no devirt — reveals URLs, remotes, webhooks)
+python main.py sample.lua -o trace.lua --no-devirt
 ```
 
-If you already cloned without `--recursive`, initialize and pull the submodules:
+If you cloned without `--recursive`, initialize submodules with:
 
 ```bash
 git submodule update --init --recursive
 ```
 
-### 2. Verify / Set Permissions (Linux / macOS)
+---
 
-Ensure the prebuilt Luau binaries have executable permissions:
+## CLI Reference
 
-```bash
-chmod +x deobfuscators/v15_1/bin/luau deobfuscators/v15_1/bin/luau-ast
-```
+| Flag | Description |
+|---|---|
+| `-o <file>` | Output path for deobfuscated Lua |
+| `--detect-only` | Print detected version and exit |
+| `--version <v>` | Force a version (`v14`, `v14.7`, `v15.1`, `v15.2`, …) |
+| `--engine <e>` | Force a v14 sub-engine (`14.7`, `14.8`, `14.9`) |
+| `--no-devirt` | Skip devirtualization — fast behavior trace only |
+| `--fast` | Single-candidate devirt (v15.1); skips seed randomization |
+| `--json` | Machine-readable JSON output from `detector.py` |
+| `--debug` | Keep all intermediate files (VM dumps, proto maps, traces) |
+| `-q` | Quiet — suppress progress, emit only deobfuscated code on stdout |
 
-*(Note: `main.py` automatically sets these permissions on startup.)*
+### Exit Codes
 
-### 3. Optional Development Dependencies
-
-The runtime requires only the Python Standard Library. Development dependencies (type checking, testing) can be installed via:
-
-```bash
-pip install -r requirements.txt
-```
+| Code | Meaning |
+|---|---|
+| `0` | Success — output written |
+| `1` | Engine failure or timeout |
+| `2` | Invalid input or unknown version |
 
 ---
 
-## Usage Guide
+## Project Layout
 
-### Basic Deobfuscation
-
-Pass your obfuscated Lua/Luau script to `main.py`. The tool auto-detects the version, routes it to the matching engine, and outputs the result:
-
-```bash
-python main.py obfuscated.lua -o output.lua
 ```
-
-The deobfuscated Lua code is saved to `output.lua` and printed to stdout.
-
-### Auto-Detection Only
-
-To inspect a script and identify its Luraph version without deobfuscating:
-
-```bash
-# Using main.py
-python main.py sample.lua --detect-only
-
-# Or using detector.py directly
-python detector.py sample.lua
-```
-
-### JSON Machine-Readable Output (`--json`)
-
-To get a structured JSON breakdown of version, confidence, minification flag, scores, pattern matches, and negative exclusion penalties:
-
-```bash
-python detector.py sample.lua --json
-```
-
-Example output:
-```json
-{
-  "version": "v15.2",
-  "confidence": 1.0,
-  "detection_type": "structural",
-  "minified": true,
-  "scores": {
-    "v15.2": 195,
-    "v15.1": 60,
-    "v14.7": -100,
-    "v14.8": -100,
-    "v14.9": -100
-  },
-  "matched": {
-    "v15.2": [
-      "root_setmetatable",
-      "native_luau_bitops_no_bit32",
-      "script_key_injected",
-      "mapped_loadstring_slot8",
-      "v15_2_character_dict",
-      "buffer_u32_fromstring",
-      "lph_marker"
-    ],
-    "v15.1": [
-      "root_setmetatable",
-      "powers_of_2_table",
-      "buffer_u32_fromstring",
-      "lph_marker"
-    ],
-    "v14.7": [],
-    "v14.8": [],
-    "v14.9": []
-  },
-  "excluded": {
-    "v15.2": [],
-    "v15.1": ["no_bit32_slots_penalty"],
-    "v14.7": ["root_setmetatable_present"],
-    "v14.8": ["root_setmetatable_present"],
-    "v14.9": ["root_setmetatable_present"]
-  }
-}
-```
-
-### Fast Behavior Trace Mode (`--no-devirt`)
-
-If you need to quickly inspect what a script does at runtime (e.g. URLs fetched, remotes fired, webhooks called, UI created), use `--no-devirt`:
-
-```bash
-python main.py sample.lua -o trace.lua --no-devirt
-```
-
-### Forcing a Specific Version / Engine
-
-To bypass auto-detection and force a specific version or backend engine:
-
-```bash
-# Force Luraph v15.2
-python main.py input.lua -o clean.lua --version v15.2
-
-# Force Luraph v15.1
-python main.py input.lua -o clean.lua --version v15.1
-
-# Force Luraph v14.x with auto engine selection
-python main.py input.lua -o clean.lua --version v14
-
-# Force a specific Luraph v14 engine (14.7, 14.8, or 14.9)
-python main.py input.lua -o clean.lua --version v14 --engine 14.8
-```
-
-### Fast Devirtualization Mode (`--fast`)
-
-The v15.1 engine executes parallel devirtualization candidates with randomized seeds by default. For rapid single-candidate deobfuscation, use `--fast`:
-
-```bash
-python main.py input.lua -o clean.lua --fast
-```
-
-### Debug Mode (`--debug`)
-
-Keep all intermediate files (disassembly, VM chunk dumps, prototype maps, trace files):
-
-```bash
-python main.py input.lua -o clean.lua --debug
-```
-
-### Quiet Output Mode (`-q`)
-
-Suppress progress messages on stderr and emit only the deobfuscated Lua code on stdout (useful for piping into formatters or other tools):
-
-```bash
-python main.py input.lua -q -o clean.lua > deobfuscated.lua
+luraph-deobfuscator/
+├── main.py               CLI entry point and orchestrator
+├── detector.py           Bayesian version detection engine
+├── requirements.txt      Development dependencies
+├── CONTRIBUTING.md       Contributor guidelines
+├── LICENSE               MIT License
+└── deobfuscators/
+    ├── v15_2/            Luraph v15.2 engine
+    ├── v15_1/            Luraph v15.1 / v15.0 engine
+    └── v14_v15/          Luraph v14.7, v14.8, v14.9 engine
 ```
 
 ---
 
 ## How Version Detection Works
 
-`detector.py` uses a Bayesian-style heuristic engine that inspects structural AST patterns and applies both positive scoring and negative exclusion penalties:
+`detector.py` uses a Bayesian-style heuristic engine: structural AST patterns earn positive scores, and version-exclusive signatures trigger hard exclusion penalties of −100.
 
-1. **Root Construct Divergence:**
-   - **`v15.x`:** Initialized with `return setmetatable({...}, ...)`. Penalizes `v14.x` candidates with $-100$.
-   - **`v14.x`:** Initialized with a raw table `return({...})` or `local init = (function(...) return({...}) end)(...)`. Penalizes `v15.x` candidates with $-100$.
-2. **Library Slot Mapping & Native Operations:**
-   - **`v15.1`:** Maps `bit32` methods in numeric slots (`[90]=bit32.rshift`, `[99]=bit32.countlz`, `[113]=bit32.band`) and includes powers-of-2 tables (`[0]=1,2,4,8...4294967296`).
-   - **`v15.2`:** Relies on Luau native 64-bit integer bitwise operations and buffer deserialization (`buffer.writeu32`, `buffer.create`, `buffer.fromstring`), character substitution dictionaries `d={...}`, and closure maker hooks (`__MK`).
-3. **v14 Sub-Version Granularity:**
-   - **`v14.7`:** Invocation suffix `}):g()(...)`, seed table `Z = { ... }`, parameter signature `(H, K, g, N)`.
-   - **`v14.8`:** Bootstrap wrapper `local init = (function(...)`, invocation suffix `}):d()(...)`, parameter signature `(t, i)`.
-   - **`v14.9`:** Invocation suffix `}):r()(...)`, seed table `O = { ... }`, parameter signature `(d, C, a, W)`.
-4. **Header Confirmation:**
-   - Header comments are used solely to confirm or boost confidence on structurally validated scripts. A header comment alone with zero structural evidence returns `unknown` (confidence `0.00`).
+**Root construct divergence** instantly splits v14 from v15:
+- `v15.x` — `return setmetatable({...}, ...)` at root → −100 on all v14 candidates
+- `v14.x` — `return({...})` or `local init = (function(...)` → −100 on all v15 candidates
 
----
+**Sub-version fingerprints** then separate within the surviving group:
+- `v14.7`: suffix `}):g()(...)`, seed table `Z = { ... }`, params `(H, K, g, N)`
+- `v14.8`: wrapper `local init = (function(...)`, suffix `}):d()(...)`
+- `v14.9`: suffix `}):r()(...)`, seed table `O = { ... }`, params `(d, C, a, W)`
+- `v15.1`: `bit32` slots (`[90]=bit32.rshift`), powers-of-2 table
+- `v15.2`: `buffer.writeu32` / `buffer.create`, character dict `d={...}`, `__MK` hooks
 
-## Exit Codes
-
-`main.py` adheres to standard exit codes:
-
-- `0`: Deobfuscation succeeded and output was written.
-- `1`: Deobfuscation engine failure or timeout.
-- `2`: Invalid input file or unknown Luraph version.
-
----
-
-## Submodule Engines
-
-### 1. `deobfuscators/v15_2` (Luraph v15.2 Engine)
-- **Upstream:** [horiz-dev/luraph-v15.2-fix-built](https://github.com/horiz-dev/luraph-v15.2-fix-built)
-- **Runtime:** Python 3.10+ + Luau sandbox (`deobf/bin/luau`).
-
-### 2. `deobfuscators/v15_1` (Luraph v15.1 Engine)
-- **Upstream:** [ServerDeadd/Luraph-v15.1-Deobfuscator](https://github.com/ServerDeadd/Luraph-v15.1-Deobfuscator)
-- **Runtime:** Node.js 18+ + Python 3.10+ + Luau sandbox (`bin/luau`).
-
-### 3. `deobfuscators/v14_v15` (Luraph v14.x Engine)
-- **Upstream:** [larpcorrupt/luraph-v15-v14.x-deobfuscator](https://github.com/larpcorrupt/luraph-v15-v14.x-deobfuscator)
-- **Runtime:** Python 3.10+ + Luau runtime.
-
----
-
-## Contributing
-
-Contributions, opcode discoveries, and new test cases are welcome! Please read our [Contributing Guidelines](CONTRIBUTING.md) for details on code style, testing, and submission workflows.
+A header comment (`-- Luraph Obfuscator`) boosts confidence on structurally validated scripts. A header alone with no structural evidence returns `unknown` (confidence `0.00`).
 
 ---
 
 ## Legal & Disclaimer
 
-This project is created strictly for **defensive reverse engineering, malware analysis, security research, and educational purposes**. Obfuscated Lua scripts in gaming and exploit ecosystems are frequently used to conceal malicious payloads (e.g. token stealers, remote-access backdoors, Discord webhook exfiltrators).
+This project is intended strictly for **defensive reverse engineering, malware analysis, security research, and educational purposes**. Obfuscated Lua scripts in gaming ecosystems are frequently used to conceal malicious payloads — token stealers, remote-access backdoors, Discord webhook exfiltrators.
 
-- Use this tool only on scripts you own, are authorized to analyze, or are evaluating for safety.
-- This project is independent and is not affiliated with, endorsed by, or connected to Luraph, lura.ph, or Roblox Corporation.
+- Use this tool only on scripts you own or are authorized to analyze.
+- This project is not affiliated with, endorsed by, or connected to Luraph, lura.ph, or Roblox Corporation.
 
 ---
 
 ## License
 
-This project is licensed under the [MIT License](LICENSE).
+[MIT](LICENSE)
