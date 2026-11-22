@@ -1,0 +1,8 @@
+# Core and development requirements for Luraph Multi-Version Deobfuscator
+# Note: The runtime (main.py, detector.py) utilizes the Python Standard Library.
+#
+# Testing and static analysis tools:
+pytest>=7.0.0
+mypy>=1.0.0
+flake8>=6.0.0
+black>=23.0.0
